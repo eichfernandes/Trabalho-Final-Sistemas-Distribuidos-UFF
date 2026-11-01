@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+# dados e artefatos gerados (sao recriados pelos scripts)
+data/*
+!data/.gitkeep
+model/*.joblib
+# checkpoints do Spark
+checkpoints/
