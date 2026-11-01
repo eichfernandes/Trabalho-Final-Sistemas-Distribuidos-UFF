@@ -1,0 +1,6 @@
+# Dependencias Python executadas na sua maquina (Etapas 2 em diante)
+pandas>=2.1
+numpy>=1.26
+scikit-learn>=1.5,<2
+joblib>=1.3
+kagglehub>=0.3
