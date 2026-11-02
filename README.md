@@ -5,7 +5,7 @@ Previsão em tempo real da probabilidade de uma reserva de hotel se confirmar (b
 Fluxo: `Producer → Kafka (reservas) → Spark Streaming → Kafka (previsoes) → Consumidor`
 
 > **Status:** em desenvolvimento. Este README é atualizado a cada etapa.
-> Etapas concluídas até agora: **1 — Infraestrutura (Kafka + Spark)** e **2 — Preparo dos dados e treino do modelo**.
+> Etapas concluídas até agora: **1 — Infraestrutura (Kafka + Spark)** **2 — Preparo dos dados e treino do modelo** e **3 — Producer**.
 
 ---
 
@@ -179,6 +179,7 @@ O terceiro comando deve imprimir `ola kafka`.
 | Parar tudo (mantém os dados do Kafka) | `docker compose down` |
 | Subir novamente | `docker compose up -d` |
 | **Resetar tudo** (apaga mensagens e tópicos) | `docker compose down -v` |
+| Zerar só o tópico `reservas` (apaga as mensagens) | `docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic reservas` e depois `docker compose up kafka-init` (recria o tópico) |
 | Listar tópicos | `docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list` |
 | Ver detalhes das partições | `docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic reservas` |
 
@@ -271,7 +272,71 @@ ls model data         # macOS / Linux
 
 ---
 
-## 9. Problemas comuns
+## 9. Executando o producer (Etapa 3)
+
+O producer lê o `data/reservas_replay.csv` e publica cada reserva, em ordem cronológica, como uma mensagem JSON no tópico `reservas` do Kafka.
+
+### 9.1. Antes de rodar
+
+1. O Kafka precisa estar no ar: `docker compose up -d` e `docker compose ps -a` (o `kafka` deve estar `healthy`).
+2. O treino da Etapa 2 precisa ter sido feito (o arquivo `data/reservas_replay.csv` deve existir).
+3. O ambiente virtual deve estar ativo e com a dependência nova instalada (o `requirements.txt` ganhou o `confluent-kafka`):
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+### 9.2. Teste rápido (100 reservas)
+
+```bash
+python producer/producer.py --limite 100
+```
+
+Deve imprimir a conexão com o Kafka, o progresso e, no final, um resumo parecido com:
+
+```
+Enviadas: 100 | Entregues e confirmadas pelo Kafka: 100 | Erros: 0
+Mensagens por partição: {0: 34, 1: 31, 2: 35}
+```
+
+Conferência: `Enviadas` e `Entregues` devem ser iguais, `Erros` deve ser 0, e as mensagens devem aparecer **nas 3 partições** (é o Kafka dividindo a carga).
+
+### 9.3. Conferindo o que chegou no Kafka
+
+Ler as 3 primeiras mensagens do tópico:
+
+```bash
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic reservas --from-beginning --max-messages 3
+```
+
+Cada linha é uma reserva em JSON (campos como `id_reserva`, `hotel`, `lead_time`, `deposit_type`, `data_reserva`, `desfecho_real`, `ts_envio_ms`).
+
+Ver quantas mensagens há em cada partição:
+
+```bash
+docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic reservas
+```
+
+A saída tem o formato `reservas:partição:total`. A soma dos três totais é o número de mensagens no tópico.
+
+### 9.4. Opções do producer
+
+| Opção | Efeito | Padrão |
+|---|---|---|
+| `--taxa N` | N reservas por segundo (`0` = velocidade máxima) | 5 |
+| `--limite N` | envia só as N primeiras reservas | todas |
+| `--csv CAMINHO` | usa outro arquivo de replay | `data/reservas_replay.csv` |
+| `--topico NOME` | tópico de destino | `reservas` |
+| `--bootstrap HOST:PORTA` | endereço do Kafka | `localhost:29092` |
+
+O replay completo tem cerca de 17 mil reservas. A 5 reservas/s isso leva quase 1 hora; para uma demonstração use algo como `--taxa 50` (~6 minutos).
+
+### 9.5. Atenção: rodar duas vezes duplica as mensagens
+
+O Kafka guarda as mensagens em disco. Se o producer for executado de novo, as reservas são publicadas outra vez. Para começar do zero, apague e recrie o tópico (comando na tabela da seção 6) ou use `docker compose down -v` (que apaga tudo, inclusive os outros tópicos) seguido de `docker compose up -d`.
+
+---
+
+## 10. Problemas comuns
 
 **`Cannot connect to the Docker daemon`** — o Docker não está rodando. Abra o Docker Desktop (Windows/macOS) ou execute `sudo systemctl start docker` (Linux).
 
@@ -293,6 +358,14 @@ ls model data         # macOS / Linux
 
 **`FileNotFoundError` / dataset não encontrado** — veja a seção 8 sobre o download manual do dataset.
 
+**`Nao foi possivel conectar ao Kafka em localhost:29092`** — o Docker não está rodando ou os containers estão desligados. Rode `docker compose up -d` e confira com `docker compose ps -a`.
+
+**`O topico 'reservas' nao existe`** — o `kafka-init` não rodou. Execute `docker compose up kafka-init` e veja `docker compose logs kafka-init`.
+
+**`ModuleNotFoundError: No module named 'confluent_kafka'`** — falta instalar a dependência nova: `pip install -r requirements.txt` com o ambiente virtual ativo.
+
+**`Arquivo nao encontrado: ...reservas_replay.csv`** — o treino ainda não foi executado (seção 8).
+
 ---
 
 ## Estrutura do projeto
@@ -306,7 +379,8 @@ trabalho_final_sd/
 ├── data/                # dataset e reservas_replay.csv (gerados na Etapa 2)
 ├── model/
 │   └── treinar_modelo.py  # preparo dos dados + treino (Etapa 2)
-├── producer/            # producer Kafka (Etapa 3)
+├── producer/
+│   └── producer.py      # publica as reservas no Kafka (Etapa 3)
 ├── spark/               # job de streaming (Etapa 4)
 ├── consumer/            # painel e alertas (Etapa 5)
 └── README.md
@@ -316,7 +390,7 @@ trabalho_final_sd/
 
 - [x] Etapa 1 — Infraestrutura (Kafka + Spark)
 - [x] Etapa 2 — Preparo dos dados e treino do Random Forest
-- [ ] Etapa 3 — Producer
+- [x] Etapa 3 — Producer
 - [ ] Etapa 4 — Spark Structured Streaming
 - [ ] Etapa 5 — Consumidor, painel e alertas
 - [ ] Etapa 6 — Testes e demonstração de resiliência
