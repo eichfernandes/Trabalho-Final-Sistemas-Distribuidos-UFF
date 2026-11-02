@@ -1,11 +1,25 @@
-# Trabalho Final SD - infraestrutura (Etapa 1)
-# Kafka (modo KRaft, sem Zookeeper) + cluster Spark (1 master + 2 workers)
+# Trabalho Final SD - infraestrutura e jobs
+#
+#   Etapa 1: Kafka (modo KRaft) + cluster Spark (1 master + 2 workers)
+#   Etapa 2: servico `treino`     - treina o modelo dentro da mesma imagem do Spark
+#   Etapa 4: servico `streaming`  - job Spark Structured Streaming
 #
 # Acesso ao Kafka:
 #   - de DENTRO dos containers (Spark, etc.): kafka:9092
 #   - da SUA MAQUINA (producer/consumer em Python): localhost:29092
 
 name: trabalho_final_sd
+
+# Imagem unica do Spark, construida a partir de spark/Dockerfile.
+# O projeto inteiro e montado em /app para que master, workers e jobs enxerguem
+# o mesmo codigo (common/) e o mesmo modelo (model/).
+x-spark: &spark
+  build:
+    context: .
+    dockerfile: spark/Dockerfile
+  image: trabalho_final_sd/spark:3.5.3
+  volumes:
+    - .:/app
 
 services:
   kafka:
@@ -55,21 +69,21 @@ services:
         $$BIN/kafka-topics.sh --bootstrap-server kafka:9092 --list
 
   spark-master:
-    image: apache/spark:3.5.3-python3
+    <<: *spark
     container_name: spark-master
     hostname: spark-master
-    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master", "--host", "spark-master"]
+    command: ["spark-class", "org.apache.spark.deploy.master.Master", "--host", "spark-master"]
     ports:
       - "8080:8080"   # Spark Master UI
       - "7077:7077"   # endereco do master (spark://spark-master:7077)
 
   spark-worker-1:
-    image: apache/spark:3.5.3-python3
+    <<: *spark
     container_name: spark-worker-1
     hostname: spark-worker-1
     depends_on:
       - spark-master
-    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    command: ["spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
     environment:
       SPARK_WORKER_CORES: 2
       SPARK_WORKER_MEMORY: 1g
@@ -77,17 +91,70 @@ services:
       - "8081:8081"
 
   spark-worker-2:
-    image: apache/spark:3.5.3-python3
+    <<: *spark
     container_name: spark-worker-2
     hostname: spark-worker-2
     depends_on:
       - spark-master
-    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    command: ["spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
     environment:
       SPARK_WORKER_CORES: 2
       SPARK_WORKER_MEMORY: 1g
     ports:
       - "8082:8081"
 
+  # Treino do modelo (Etapa 2) dentro da imagem do Spark, para as versoes das
+  # bibliotecas serem identicas as dos executors.  Uso: docker compose run --rm treino
+  treino:
+    <<: *spark
+    profiles: ["jobs"]
+    command: ["python", "model/treinar_modelo.py"]
+
+  # Job de streaming (Etapa 4).  Uso: docker compose up -d streaming
+  streaming:
+    <<: *spark
+    container_name: streaming
+    hostname: streaming
+    profiles: ["jobs"]
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      spark-worker-1:
+        condition: service_started
+      spark-worker-2:
+        condition: service_started
+    ports:
+      - "4040:4040"   # interface do job de streaming
+    volumes:
+      - .:/app
+      - checkpoints:/checkpoints   # estado do streaming (permite retomar apos falha)
+      - ivy-cache:/ivy             # cache do conector Kafka (evita baixar toda vez)
+    command:
+      - spark-submit
+      - --master
+      - spark://spark-master:7077
+      - --packages
+      - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3
+      - --conf
+      - spark.jars.ivy=/ivy
+      - --conf
+      - spark.driver.host=streaming
+      - --conf
+      - spark.driver.bindAddress=0.0.0.0
+      - --conf
+      - spark.executor.memory=768m
+      - --conf
+      - spark.executor.cores=2
+      - --conf
+      - spark.cores.max=4
+      - /app/spark/streaming_job.py
+      - --max-por-lote
+      - "${MAX_POR_LOTE:-1000}"    # reservas por micro-lote (capacidade = max-por-lote / intervalo)
+      - --intervalo
+      - "${INTERVALO:-2}"          # segundos entre micro-lotes
+
 volumes:
   kafka-data:
+  checkpoints:
+  ivy-cache:

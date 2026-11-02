@@ -1,0 +1,9 @@
+# Versoes FIXAS usadas dentro dos containers (Spark e treino do modelo).
+# O pyspark (pip) ja traz o Spark completo, incluindo master e worker.
+pyspark==3.5.3
+pandas==2.2.3
+numpy==1.26.4
+scikit-learn==1.5.2
+pyarrow==16.1.0
+joblib==1.4.2
+kagglehub>=0.3

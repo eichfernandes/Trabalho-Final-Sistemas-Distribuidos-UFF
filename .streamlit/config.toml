@@ -1,0 +1,7 @@
+[server]
+# Nao abre o navegador sozinho nem pede e-mail no primeiro uso.
+# Abra manualmente: http://localhost:8501
+headless = true
+
+[browser]
+gatherUsageStats = false
