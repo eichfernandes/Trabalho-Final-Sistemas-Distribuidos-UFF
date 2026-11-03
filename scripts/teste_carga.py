@@ -122,7 +122,12 @@ def main() -> None:
         if not r["recebidas"]:
             print(f"{r['taxa']:>13g} {0:>10} {'-':>12} {'-':>9} {'-':>9} {'-':>9}  sem resposta")
             continue
-        situacao = "ok" if r["lat_p95_s"] < 10 and r["concluiu"] else "SATURADO (latencia crescendo)"
+        if not r["concluiu"] or r["lat_p95_s"] >= 10:
+            situacao = "SATURADO (latencia crescendo)"
+        elif r["vazao_saida"] < 0.9 * r["taxa"]:
+            situacao = "NO LIMITE (saida abaixo da chegada)"
+        else:
+            situacao = "ok"
         print(f"{r['taxa']:>13g} {r['recebidas']:>10} {r['vazao_saida']:>10.0f}/s {r['lat_p50_s']:>8.1f}s "
               f"{r['lat_p95_s']:>8.1f}s {r['lat_p99_s']:>8.1f}s  {situacao}")
 

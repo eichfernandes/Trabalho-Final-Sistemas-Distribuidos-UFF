@@ -1,11 +1,21 @@
-__pycache__/
-*.pyc
+# Ambiente virtual do Python
 .venv/
 venv/
-.ipynb_checkpoints/
-# dados e artefatos gerados (sao recriados pelos scripts)
+__pycache__/
+*.pyc
+
+# Dados e artefatos gerados pelo treino (sao recriados com: docker compose run --rm treino)
 data/*
 !data/.gitkeep
 model/*.joblib
-# checkpoints do Spark
+model/metadados.json
+
+# Resultados de testes e checkpoints locais
 checkpoints/
+
+# Sistema / editores
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.ipynb_checkpoints/

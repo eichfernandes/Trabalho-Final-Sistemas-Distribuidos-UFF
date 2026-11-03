@@ -1,74 +1,95 @@
-# Trabalho Final — Sistemas Distribuídos
+# Previsão de Cancelamento de Reservas em Tempo Real
 
-Previsão em tempo real da probabilidade de uma reserva de hotel se confirmar (base Hotel Booking Demand), usando **Kafka** e **Spark Structured Streaming**.
+> Trabalho Final de Sistemas Distribuídos — Kafka + Spark Structured Streaming + Machine Learning
 
-Fluxo: `Producer → Kafka (reservas) → Spark Streaming → Kafka (previsoes) → Consumidor`
+## O que é este projeto
 
-> **Status:** em desenvolvimento. Este README é atualizado a cada etapa.
-> Etapas concluídas até agora: **1 — Infraestrutura**, **2 — Treino do modelo**, **3 — Producer**, **4 — Spark Streaming**, **5 — Painel** e **6 — Testes de resiliência e desempenho**.
+Hotéis só descobrem que uma reserva vai ser cancelada quando já é tarde para agir. Na base pública *Hotel Booking Demand*, cerca de 37% das reservas terminam em cancelamento ou no-show: cada uma é um quarto vazio e receita perdida.
 
----
+Este projeto trata **cada reserva que chega como um evento** e devolve, na hora, a **probabilidade de o hóspede realmente chegar**. Com base nela, a equipe do hotel age antes do cancelamento:
 
-## Início rápido (com tudo já instalado)
+| Probabilidade de chegar | Faixa | O que fazer |
+|---|---|---|
+| abaixo de 40% | Risco alto | Reserva provavelmente perdida: agir primeiro nela |
+| de 40% a 60% | Risco médio | Vale ligar ou fazer uma oferta |
+| acima de 60% | Risco baixo | Preservar a reserva |
 
-Depois de seguir as seções 2 a 10 uma vez, a demonstração completa usa **3 terminais**, todos na raiz do projeto (nos que usam Python, com o ambiente virtual ativo):
+**Como funciona, em uma linha:**
 
-```bash
-# Terminal 1 - infraestrutura e job de streaming
-docker compose up -d
-docker compose up -d streaming
-
-# Terminal 2 - painel (abra http://localhost:8501 no navegador)
-streamlit run consumer/painel.py
-
-# Terminal 3 - simula a chegada das reservas
-python producer/producer.py --taxa 50
+```
+Producer → Kafka (reservas) → Spark Streaming + Random Forest → Kafka (previsoes) → Painel
 ```
 
-Para parar: `Ctrl+C` no painel e no producer, e `docker compose down` para desligar o Docker. Para recomeçar do zero, use `docker compose down -v`.
+1. Um **producer** reproduz as reservas do dataset em ordem cronológica e as publica no **Kafka**, no tópico `reservas`.
+2. O **Spark Structured Streaming** lê esse tópico em micro-lotes, limpa os dados e aplica um **Random Forest** (treinado antes, com o histórico) em paralelo, em vários workers.
+3. As previsões são publicadas em outro tópico do Kafka, `previsoes`.
+4. Um **painel web** (Streamlit) lê esse tópico e mostra, ao vivo, os alertas por faixa de risco, a receita em risco, a qualidade do modelo e métricas do sistema distribuído.
+
+**Tecnologias:** Apache Kafka (modo KRaft), Apache Spark 3.5 (PySpark, pandas UDF), scikit-learn (Random Forest), Streamlit, Docker Compose.
 
 ---
 
-## 1. Pré-requisitos
+## Guia de leitura: o que você quer fazer?
 
-| Item | Mínimo recomendado |
+| Eu quero... | Vá para |
 |---|---|
-| Memória RAM | 8 GB (o cluster usa ~3 GB; no Docker Desktop, configure pelo menos 6 GB — seção 2) |
-| Espaço em disco | 8 GB livres (as imagens Docker somam ~3 GB) |
-| Internet | necessária na primeira execução (download das imagens Docker) |
-| Docker + Docker Compose | instalação abaixo |
-| Python 3.10 ou superior | para o producer e o consumer (seção 7) |
-
-O Docker Compose já vem junto com o Docker Desktop (Windows/macOS) e como plugin no Docker Engine (Linux). Todos os comandos usam a sintaxe moderna `docker compose` (com espaço).
+| Instalar o que é preciso no meu computador | [2. Instalação](#2-instalação-uma-vez-por-computador) |
+| **Rodar o projeto pela primeira vez** | [3. Primeira execução](#3-primeira-execução-passo-a-passo) |
+| **Ligar de novo e usar nos dias seguintes** | [4. Uso no dia a dia](#4-uso-no-dia-a-dia-depois-da-primeira-vez) |
+| **Zerar tudo e testar do zero** | [5. Zerar e testar do zero](#5-zerar-e-testar-do-zero) |
+| Testar falhas, desempenho e reprocessamento | [6. Testes de resiliência e desempenho](#6-testes-de-resiliência-e-desempenho) |
+| Entender como o projeto funciona por dentro | [7. Como o projeto funciona](#7-como-o-projeto-funciona) |
+| Consultar portas e comandos úteis | [8. Referência rápida](#8-referência-rápida) |
+| Resolver um erro | [9. Problemas comuns](#9-problemas-comuns) |
+| Preparar a apresentação | [`ROTEIRO_DEMONSTRACAO.md`](ROTEIRO_DEMONSTRACAO.md) |
 
 ---
 
-## 2. Instalando o Docker
+## 1. O que você precisa
 
-### Windows 10/11
+| Item | Requisito |
+|---|---|
+| Sistema | Windows 10/11, macOS ou Linux |
+| Memória RAM | 8 GB (o Docker precisa de pelo menos 6 GB disponíveis) |
+| Espaço em disco | 8 GB livres (as imagens Docker somam ~3 GB) |
+| Internet | Necessária na primeira execução (imagens Docker, dataset e conector do Kafka) |
+| Docker + Docker Compose | Instalação na seção 2.1 |
+| Python 3.10 a 3.13 | Instalação na seção 2.2 (usado pelo producer e pelo painel) |
+
+> **Convenção deste guia:** os comandos estão no formato do **PowerShell** (Windows). No macOS/Linux, os comandos de `docker` são idênticos; as diferenças (ativar o ambiente virtual, apagar arquivos) estão indicadas.
+
+---
+
+## 2. Instalação (uma vez por computador)
+
+### 2.1. Docker
+
+#### Windows 10/11
 
 1. Abra o **PowerShell como administrador** e instale o WSL 2:
    ```powershell
    wsl --install
    ```
    Reinicie o computador quando solicitado.
-2. Baixe e instale o **Docker Desktop** em <https://www.docker.com/products/docker-desktop/>.
+2. Baixe e instale o **Docker Desktop** em <https://www.docker.com/products/docker-desktop/>. Escolha a versão **AMD64** (Intel/AMD) ou **ARM64** (só para notebooks com processador ARM). Para descobrir: `echo $env:PROCESSOR_ARCHITECTURE` mostra `AMD64` ou `ARM64`.
 3. Na instalação, mantenha marcada a opção **"Use WSL 2 instead of Hyper-V"**.
-4. Abra o Docker Desktop e aguarde o ícone da baleia indicar *"Docker Desktop is running"*.
-5. (Recomendado) Em *Settings → Resources*, garanta pelo menos **4 GB de memória** para o Docker. Se usar WSL 2, isso é configurado no arquivo `%UserProfile%\.wslconfig`:
+4. Abra o Docker Desktop e aguarde a mensagem *"Docker Desktop is running"*.
+5. Dê memória ao Docker: crie (ou edite) o arquivo `%UserProfile%\.wslconfig` com:
    ```ini
    [wsl2]
    memory=6GB
    ```
-   Depois execute `wsl --shutdown` e reabra o Docker Desktop.
+   Depois rode `wsl --shutdown` no PowerShell e reabra o Docker Desktop.
 
-### macOS
+> Se o `wsl --install` der o erro `Wsl/Service/E_UNEXPECTED` ou ficar pedindo "Enter new UNIX username" em loop, veja a [seção 9.1](#91-instalação-docker-e-wsl).
 
-1. Baixe o **Docker Desktop** em <https://www.docker.com/products/docker-desktop/> (escolha a versão *Apple Silicon* ou *Intel* conforme o seu Mac).
+#### macOS
+
+1. Baixe o **Docker Desktop** em <https://www.docker.com/products/docker-desktop/> (versão *Apple Silicon* ou *Intel*, conforme o seu Mac).
 2. Arraste para *Applications*, abra e aceite os termos.
-3. Em *Settings → Resources*, garanta pelo menos **4 GB de memória**.
+3. Em *Settings → Resources*, dê pelo menos **6 GB** de memória.
 
-### Linux (Ubuntu/Debian)
+#### Linux (Ubuntu/Debian)
 
 ```bash
 # Remove versões antigas (se existirem)
@@ -94,466 +115,482 @@ sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plug
 sudo usermod -aG docker $USER
 ```
 
-Para outras distribuições, siga <https://docs.docker.com/engine/install/>.
+Para outras distribuições: <https://docs.docker.com/engine/install/>.
 
-### Conferindo a instalação
+#### Conferindo a instalação
 
-```bash
+```powershell
 docker --version
 docker compose version
 docker run --rm hello-world
 ```
 
-Se os três comandos funcionarem, o Docker está pronto.
+O último comando deve imprimir *"Hello from Docker!"*. Se os três funcionarem, o Docker está pronto.
 
----
+### 2.2. Python
 
-## 3. Obtendo o projeto
+- **Windows:** baixe o instalador em <https://www.python.org/downloads/> (versão 3.10 a 3.13). **Na primeira tela, marque a caixa "Add python.exe to PATH"** antes de clicar em *Install Now*.
+- **macOS:** `brew install python` (com Homebrew) ou o instalador de python.org.
+- **Linux:** `sudo apt-get install -y python3 python3-venv python3-pip`
+
+Confira em um terminal **novo** (aberto depois da instalação):
+
+```powershell
+python --version
+```
+
+(No macOS/Linux, use `python3 --version`.) Deve mostrar a versão instalada.
+
+### 2.3. Obtendo o projeto
 
 Com Git:
 
-```bash
-git clone <URL-DO-REPOSITORIO> trabalho_final_sd
-cd trabalho_final_sd
-```
-
-Ou baixe o `.zip` do projeto, extraia e entre na pasta `trabalho_final_sd`.
-
-Todos os comandos a seguir devem ser executados **dentro dessa pasta** (onde está o `docker-compose.yml`).
-
----
-
-## 4. Subindo a infraestrutura (Etapa 1)
-
-```bash
-docker compose up -d --build
-```
-
-Na primeira vez, o Docker baixa a imagem do Kafka e **constrói a imagem do Spark** (Python, Java e as bibliotecas de ML), o que leva de 5 a 10 minutos. Nas próximas vezes basta `docker compose up -d`. O comando sobe:
-
-| Serviço | Função |
-|---|---|
-| `kafka` | Broker Kafka (modo KRaft, sem Zookeeper) |
-| `kafka-init` | Cria os tópicos `reservas` e `previsoes` (3 partições cada) e encerra |
-| `spark-master` | Coordenador do cluster Spark (imagem própria, `spark/Dockerfile`) |
-| `spark-worker-1`, `spark-worker-2` | Executores (2 cores e 1 GB cada) |
-
-### Portas utilizadas
-
-| Porta | Uso |
-|---|---|
-| `29092` | Kafka — acesso a partir da sua máquina (producer/consumer) |
-| `8080` | Interface web do Spark Master → <http://localhost:8080> |
-| `8081` / `8082` | Interface web dos workers 1 e 2 |
-| `7077` | Endereço do Spark Master |
-| `4040` | Interface do job de streaming (quando o `streaming` está rodando) |
-| `8501` | Painel Streamlit (Etapa 5) |
-
-Se alguma porta já estiver em uso na sua máquina, encerre o programa que a ocupa ou altere o lado esquerdo do mapeamento no `docker-compose.yml` (ex.: `"8090:8080"`).
-
----
-
-## 5. Verificando se está tudo funcionando
-
-**5.1. Status dos containers**
-
-```bash
-docker compose ps -a
-```
-
-Esperado: `kafka` como `healthy`; `spark-master`, `spark-worker-1` e `spark-worker-2` como `running`; `kafka-init` como `exited (0)` (é o comportamento correto, ele só cria os tópicos).
-
-**5.2. Tópicos criados**
-
-```bash
-docker compose logs kafka-init
-```
-
-Deve terminar listando `previsoes` e `reservas`.
-
-**5.3. Cluster Spark**
-
-Abra <http://localhost:8080>. A página deve mostrar **2 workers** com status `ALIVE`.
-
-**5.4. Teste de ida e volta no Kafka**
-
-Cria um tópico temporário, publica uma mensagem, lê de volta e apaga o tópico:
-
-```bash
-docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic teste --partitions 1 --replication-factor 1
-
-echo "ola kafka" | docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic teste
-
-docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic teste --from-beginning --max-messages 1 --timeout-ms 15000
-
-docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic teste
-```
-
-O terceiro comando deve imprimir `ola kafka`.
-
----
-
-## 6. Comandos do dia a dia
-
-| Ação | Comando |
-|---|---|
-| Ver logs de um serviço | `docker compose logs -f kafka` |
-| Parar tudo (mantém os dados do Kafka) | `docker compose down` |
-| Subir novamente | `docker compose up -d` |
-| **Resetar tudo** (apaga mensagens e tópicos) | `docker compose down -v` |
-| **Zerar o pipeline inteiro** (mensagens, tópicos e checkpoint do Spark) | `docker compose down -v` e depois `docker compose up -d` |
-| Listar tópicos | `docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list` |
-| Ver detalhes das partições | `docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic reservas` |
-
----
-
-## 7. Preparando o ambiente Python (producer e consumer)
-
-O producer (Etapa 3) e o consumer (Etapa 5) rodam na **sua máquina**, fora do Docker, então é preciso ter o Python. O treino do modelo e o Spark rodam dentro do Docker (seções 8 e 10) e não dependem do seu Python.
-
-### 7.1. Instalando o Python
-
-- **Windows:** baixe o instalador em <https://www.python.org/downloads/> (versão 3.10 ou superior). **Na primeira tela, marque a caixa "Add python.exe to PATH"** antes de clicar em *Install Now*.
-- **macOS:** `brew install python` (com Homebrew) ou o instalador de python.org.
-- **Linux (Ubuntu/Debian):** `sudo apt-get install -y python3 python3-venv python3-pip`
-
-Confira (em um terminal **novo**, aberto depois da instalação):
-
-```bash
-python --version      # Windows (se não funcionar, tente: py --version)
-python3 --version     # macOS / Linux
-```
-
-### 7.2. Criando o ambiente virtual e instalando as dependências
-
-Na pasta do projeto:
-
-**Windows (PowerShell)**
 ```powershell
+git clone <URL-DO-REPOSITORIO> trabalho_final_sd
+```
+
+Ou baixe o `.zip` do projeto e extraia. Daqui em diante, **"pasta do projeto"** é a pasta `trabalho_final_sd` (a que contém o arquivo `docker-compose.yml`).
+
+### 2.4. Ambiente virtual do Python (uma vez)
+
+O ambiente virtual (`.venv`) isola as bibliotecas do projeto, sem bagunçar o resto do computador. Crie-o **uma única vez**, na pasta do projeto:
+
+```powershell
+cd "C:\caminho\para\trabalho_final_sd"
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-Se o PowerShell bloquear a ativação com um erro sobre *execução de scripts desabilitada*, rode uma vez `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, responda `S` e repita a ativação.
+(Se o caminho tiver espaços, as aspas são obrigatórias.)
 
-**macOS / Linux**
+**macOS / Linux:**
 ```bash
+cd /caminho/para/trabalho_final_sd
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Quando o ambiente está ativo, o terminal mostra `(.venv)` no início da linha. **Sempre ative o ambiente antes de rodar os scripts do projeto** (em cada terminal novo).
+Quando o ambiente está ativo, aparece **`(.venv)`** no começo da linha do terminal. Se o PowerShell reclamar de *"execução de scripts desabilitada"*, rode uma vez `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, responda `S` e repita a ativação.
+
+> **Lembrete importante:** o ambiente virtual precisa ser **ativado em cada terminal novo** que for rodar Python (producer, painel, scripts). O comando é só `.venv\Scripts\Activate.ps1` (Windows) ou `source .venv/bin/activate` (macOS/Linux). Para sair dele, use `deactivate`.
 
 ---
 
-## 8. Treinando o modelo (Etapa 2)
+## 3. Primeira execução (passo a passo)
 
-O treino é executado **uma única vez**, **dentro do Docker**, na mesma imagem usada pelos executors do Spark. Isso é importante: o arquivo do modelo (`.joblib`) só é confiável se o treino e a inferência usarem exatamente as mesmas versões de Python, pandas e scikit-learn.
+Faça estes passos **na ordem**, na primeira vez que rodar o projeto. Depois da primeira vez, o dia a dia fica bem mais curto (seção 4).
 
-Com o Docker rodando, na raiz do projeto:
+### Antes de começar: os 3 terminais
 
-```bash
-docker compose build spark-master
+O projeto usa **três terminais PowerShell abertos ao mesmo tempo**, todos na **pasta do projeto**:
+
+| Terminal | Para quê | Python? |
+|---|---|---|
+| **Terminal 1** | Comandos do Docker (ligar, ver logs, desligar) | Não |
+| **Terminal 2** | O painel (fica rodando) | Sim, com `(.venv)` ativo |
+| **Terminal 3** | O producer e os scripts de teste | Sim, com `(.venv)` ativo |
+
+**Como abrir um terminal já na pasta do projeto:**
+- No Windows: abra a pasta no Explorador de Arquivos, clique na barra de endereço, digite `powershell` e aperte Enter; ou
+- No VS Code: abra a pasta do projeto e use *Terminal → Novo Terminal* (e o botão **+** para abrir mais).
+
+Por enquanto abra só o **Terminal 1**. Os outros entram quando forem necessários.
+
+---
+
+### Passo 1: Ligar o Docker e subir a infraestrutura (Terminal 1)
+
+Abra o **Docker Desktop** e espere aparecer *"Docker Desktop is running"*. Depois:
+
+```powershell
+docker compose up -d --build
+```
+
+**Na primeira vez, isso leva de 5 a 10 minutos**: o Docker baixa a imagem do Kafka e *constrói* a imagem do Spark (Python, Java e bibliotecas de ML). Nas próximas vezes é questão de segundos.
+
+Quando terminar, confira:
+
+```powershell
+docker compose ps -a
+```
+
+O esperado é:
+
+| Container | Status esperado |
+|---|---|
+| `kafka` | `Up ... (healthy)` |
+| `spark-master`, `spark-worker-1`, `spark-worker-2` | `Up` |
+| `kafka-init` | `Exited (0)` — **é o correto**: ele só cria os tópicos `reservas` e `previsoes` e termina |
+
+Abra <http://localhost:8080> no navegador: a página do Spark Master deve mostrar **2 workers** com status `ALIVE` (se mostrar 0, espere 20 segundos e atualize).
+
+---
+
+### Passo 2: Treinar o modelo (Terminal 1)
+
+O modelo de IA (Random Forest) precisa ser treinado **uma vez**. O treino roda dentro do Docker, para usar exatamente as mesmas versões de bibliotecas do Spark:
+
+```powershell
 docker compose run --rm treino
 ```
 
-O primeiro comando constrói a imagem (só demora na primeira vez; se você já fez `docker compose up -d --build`, termina em segundos). O segundo baixa o dataset *Hotel Booking Demand* do Kaggle (precisa de internet; se o arquivo `data/hotel_bookings.csv` já existir, ele é reaproveitado), limpa os dados, treina o Random Forest e avalia. Leva de 1 a 3 minutos.
+Ele baixa o dataset *Hotel Booking Demand* do Kaggle (precisa de internet), limpa os dados, treina o modelo e avalia. **Leva de 1 a 4 minutos.** A saída passa por cinco blocos (`=== 1. Carga e limpeza ===` até `=== 5. Salvando artefatos ===`) e termina com **`Concluido.`**
 
-> **Se você já treinou o modelo antes pelo Python local, rode este passo de novo.** O modelo antigo foi gerado com outras versões de biblioteca e não deve ser usado pelo Spark.
+Na parte `=== 4. Avaliacao no conjunto de teste ===`, o **ROC-AUC** deve ficar **acima de 0,90**. Aparecem também a acurácia, a matriz de confusão e quantas reservas caem em cada faixa de risco.
 
-**Se o download automático falhar:** baixe o arquivo manualmente em <https://www.kaggle.com/datasets/jessemostipak/hotel-booking-demand>, extraia o `hotel_bookings.csv` para a pasta `data/` e rode o comando novamente.
+Confira que os arquivos foram criados:
 
-### O que ele gera
-
-| Arquivo | Conteúdo |
-|---|---|
-| `model/modelo_rf.joblib` | Pipeline treinado (one-hot encoding + Random Forest) |
-| `model/metadados.json` | Parâmetros usados no treino (teto de ADR, países mantidos, limiares, versões das bibliotecas, métricas) |
-| `data/reservas_replay.csv` | Reservas que o producer vai reproduzir, em ordem cronológica de reserva |
-
-Esses arquivos **não vão para o GitHub** (estão no `.gitignore`): quem clonar o projeto os recria com o comando acima.
-
-### Como conferir se deu certo
-
-A saída no terminal deve terminar com `Concluido.` e mostrar, na seção de avaliação, valores na faixa de:
-
-- ROC-AUC em torno de **0,92 a 0,95**
-- Acurácia em torno de **0,85 a 0,88**
-- Tamanho do modelo de algumas dezenas de MB (se passar de ~150 MB, avise)
-- Uma distribuição nas três faixas de risco (< 40%, 40–60%, > 60%)
-
-Confira também que existem os três arquivos da tabela acima:
-
-```bash
-dir model data        # Windows
-ls model data         # macOS / Linux
+```powershell
+dir model
+dir data
 ```
 
-### Decisões de projeto desta etapa
+Devem existir `model\modelo_rf.joblib`, `model\metadados.json` e, em `data\`, `hotel_bookings.csv` e `reservas_replay.csv`.
 
-- O replay usa **somente os 20% de teste**, que o modelo nunca viu. Assim a acurácia mostrada em tempo real no painel é honesta.
-- O pré-processamento está em `common/preprocessing.py`, usado tanto no treino quanto no Spark, para garantir que o modelo veja as mesmas features nos dois lugares.
-- O resultado real da reserva (`desfecho_real`) viaja no evento **apenas** para o painel comparar previsão com realidade. Ele nunca é usado como entrada do modelo.
+> **Se o download do dataset falhar:** baixe o arquivo manualmente em <https://www.kaggle.com/datasets/jessemostipak/hotel-booking-demand>, copie o `hotel_bookings.csv` para a pasta `data\` e rode o comando de novo.
 
 ---
 
-## 9. Executando o producer (Etapa 3)
+### Passo 3: Iniciar o job de streaming (Terminal 1)
 
-O producer lê o `data/reservas_replay.csv` e publica cada reserva, em ordem cronológica, como uma mensagem JSON no tópico `reservas` do Kafka.
+O job do Spark é o "cérebro" do pipeline: lê as reservas do Kafka e devolve as previsões.
 
-### 9.1. Antes de rodar
-
-1. O Kafka precisa estar no ar: `docker compose up -d` e `docker compose ps -a` (o `kafka` deve estar `healthy`).
-2. O treino da Etapa 2 precisa ter sido feito (o arquivo `data/reservas_replay.csv` deve existir).
-3. O ambiente virtual deve estar ativo e com a dependência nova instalada (o `requirements.txt` ganhou o `confluent-kafka`):
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-### 9.2. Teste rápido (100 reservas)
-
-```bash
-python producer/producer.py --limite 100
-```
-
-Deve imprimir a conexão com o Kafka, o progresso e, no final, um resumo parecido com:
-
-```
-Enviadas: 100 | Entregues e confirmadas pelo Kafka: 100 | Erros: 0
-Mensagens por partição: {0: 34, 1: 31, 2: 35}
-```
-
-Conferência: `Enviadas` e `Entregues` devem ser iguais, `Erros` deve ser 0, e as mensagens devem aparecer **nas 3 partições** (é o Kafka dividindo a carga).
-
-### 9.3. Conferindo o que chegou no Kafka
-
-Ler as 3 primeiras mensagens do tópico:
-
-```bash
-docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic reservas --from-beginning --max-messages 3
-```
-
-Cada linha é uma reserva em JSON (campos como `id_reserva`, `hotel`, `lead_time`, `deposit_type`, `data_reserva`, `desfecho_real`, `ts_envio_ms`).
-
-Ver quantas mensagens há em cada partição:
-
-```bash
-docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic reservas
-```
-
-A saída tem o formato `reservas:partição:total`. A soma dos três totais é o número de mensagens no tópico.
-
-### 9.4. Opções do producer
-
-| Opção | Efeito | Padrão |
-|---|---|---|
-| `--taxa N` | N reservas por segundo (`0` = velocidade máxima) | 5 |
-| `--limite N` | envia só as N primeiras reservas | todas |
-| `--csv CAMINHO` | usa outro arquivo de replay | `data/reservas_replay.csv` |
-| `--topico NOME` | tópico de destino | `reservas` |
-| `--bootstrap HOST:PORTA` | endereço do Kafka | `localhost:29092` |
-
-O replay completo tem cerca de 17 mil reservas. A 5 reservas/s isso leva quase 1 hora; para uma demonstração use algo como `--taxa 50` (~6 minutos).
-
-### 9.5. Atenção: rodar duas vezes duplica as mensagens
-
-O Kafka guarda as mensagens em disco. Se o producer for executado de novo, as reservas são publicadas outra vez. Para começar do zero, use `docker compose down -v` seguido de `docker compose up -d`. Isso apaga todas as mensagens, os tópicos e o checkpoint do Spark, e recria os tópicos vazios.
-
----
-
-## 10. Executando o Spark Streaming (Etapa 4)
-
-O job lê o tópico `reservas`, descarta mensagens corrompidas e reservas inválidas, aplica o Random Forest nos executors (pandas UDF), classifica a faixa de risco e publica o resultado no tópico `previsoes`. Ele roda dentro do Docker, no serviço `streaming`.
-
-### 10.1. Antes de rodar
-
-1. Infraestrutura no ar e imagem construída: `docker compose up -d --build` (seção 4).
-2. Modelo treinado **dentro do Docker**: `docker compose run --rm treino` (seção 8).
-3. Tópicos vazios (sem sobras de testes anteriores). Em caso de dúvida: `docker compose down -v` seguido de `docker compose up -d` zera tudo (depois repita o passo 2 se a pasta `model/` tiver sido limpa; ela não é apagada pelo `down -v`).
-
-### 10.2. Iniciando o job
-
-```bash
+```powershell
 docker compose up -d streaming
-docker compose logs -f streaming
 ```
 
-Na **primeira vez** o Spark baixa o conector do Kafka (~1 minuto, precisa de internet; depois fica em cache). O job está pronto quando aparecer:
+Ele leva de **30 a 60 segundos** para ficar pronto (na primeira vez, baixa também o conector do Kafka). Acompanhe com:
+
+```powershell
+docker compose logs --tail 5 streaming
+```
+
+Repita o comando até aparecer esta linha:
 
 ```
 Streaming ativo: 'reservas' -> 'previsoes' (micro-lotes a cada 2s, ate 1000 reservas por lote).
 ```
 
-Para sair dos logs sem parar o job, use `Ctrl+C` (o job continua rodando em segundo plano).
-
-### 10.3. Gerando reservas e vendo as previsões
-
-Em **outro terminal** (com o ambiente virtual ativo), publique reservas:
-
-```bash
-python producer/producer.py --limite 200 --taxa 20
-```
-
-Nos logs do `streaming` devem aparecer linhas como:
-
-```
-lote    3 |    40 reservas |   310.5 reservas/s
-```
-
-Leia algumas previsões do tópico de saída:
-
-```bash
-docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic previsoes --from-beginning --max-messages 3
-```
-
-Cada mensagem é um JSON com `id_reserva`, `probabilidade` (de o hóspede chegar), `faixa_risco` (`alto` < 40%, `medio` 40–60%, `baixo` > 60%), `desfecho_real` e carimbos de tempo para medir latência. Conferência de quantidade:
-
-```bash
-docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic previsoes
-```
-
-A soma dos totais das partições deve ser igual ao número de reservas enviadas (as reservas do replay já são válidas, então nenhuma é descartada).
-
-### 10.4. Interfaces para acompanhar
-
-| Endereço | O que mostra |
-|---|---|
-| <http://localhost:8080> | Cluster: workers, aplicação `previsao-reservas` em execução, cores e memória em uso |
-| <http://localhost:4040> | Job de streaming: aba *Structured Streaming* (vazão por lote) e *Executors* (as tarefas distribuídas entre os 2 workers) |
-
-### 10.5. Parando e retomando (checkpoint)
-
-```bash
-docker compose stop streaming     # para o job
-docker compose start streaming    # retoma de onde parou
-```
-
-O Spark guarda no *checkpoint* até onde já leu no Kafka. Ao reiniciar, ele continua dali, **sem perder reservas**. A garantia de escrita no Kafka é *pelo menos uma vez*: o lote que estava em andamento na queda pode ser escrito de novo, gerando algumas previsões repetidas (o painel as ignora). Para testar: com o producer enviando, pare o job com `stop`, espere alguns segundos, rode `start` e depois confira com `python scripts/verificar_consistencia.py` (seção 12) que nenhuma reserva ficou sem previsão.
-
-### 10.6. Zerando para recomeçar
-
-O checkpoint fica num volume do Docker e **precisa ser apagado junto com os tópicos**: se você apagar só o tópico `reservas`, o job tentará continuar de offsets que não existem mais e vai falhar. O jeito mais simples de zerar tudo:
-
-```bash
-docker compose down -v
-docker compose up -d
-```
-
-(Isso apaga também o cache do conector Kafka, que será baixado de novo no próximo `streaming`.)
+Os avisos `WARN` (por exemplo, `Current batch is falling behind` no primeiro lote) são normais. O job agora fica em segundo plano esperando reservas chegarem.
 
 ---
 
-## 11. Executando o painel (Etapa 5)
+### Passo 4: Abrir o painel (Terminal 2)
 
-O painel é uma página web (Streamlit) que lê o tópico `previsoes` do Kafka e se atualiza sozinha a cada 2 segundos. Ele roda na **sua máquina**, como o producer.
+**Abra um novo terminal** (Terminal 2), entre na pasta do projeto e ative o ambiente virtual:
 
-### 11.1. Preparação (uma vez)
+```powershell
+cd "C:\caminho\para\trabalho_final_sd"
+.venv\Scripts\Activate.ps1
+```
 
-1. Instale a dependência nova (o `requirements.txt` ganhou o `streamlit`), com o ambiente virtual ativo:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. O job de streaming ganhou o campo `noites` na saída (usado para calcular a receita em risco). Reinicie-o para carregar a versão nova:
-   ```bash
-   docker compose restart streaming
-   ```
-   Para uma demonstração limpa, o mais simples é zerar tudo: `docker compose down -v`, depois `docker compose up -d` e `docker compose up -d streaming`. Previsões geradas antes dessa mudança não têm `noites` e ficam fora do cálculo de receita.
+Confirme que apareceu `(.venv)` no início da linha. Então:
 
-### 11.2. Abrindo o painel
-
-```bash
+```powershell
 streamlit run consumer/painel.py
 ```
 
-Abra <http://localhost:8501> no navegador. (O navegador não abre sozinho; se o Windows perguntar sobre o firewall, permita o acesso.)
+O terminal mostra algo como `Local URL: http://localhost:8501`. **O navegador não abre sozinho: abra <http://localhost:8501> manualmente.** Se o Windows perguntar sobre o firewall, permita o acesso.
 
-O painel começa vazio, com a mensagem "Aguardando previsões", e se preenche quando as reservas chegam.
-
-### 11.3. Gerando reservas para ver o painel funcionando
-
-Em outro terminal, com o ambiente virtual ativo:
-
-```bash
-python producer/producer.py --taxa 50
-```
-
-São cerca de 17 mil reservas; a 50 por segundo leva uns 6 minutos. Deixe o painel aberto durante o envio para ver os números subirem e a latência ser medida.
-
-### 11.4. O que cada seção mostra
-
-| Seção | Conteúdo |
-|---|---|
-| **Topo (sempre visível)** | Reservas processadas, contagem por faixa de risco e receita estimada em risco alto (diária × noites, em euros) |
-| **Visão geral** | Insights automáticos, reservas por faixa, distribuição das probabilidades, risco por tipo de depósito / segmento / hotel / cliente e efeito da antecedência da reserva |
-| **Alertas** | Tabela das reservas de risco alto e médio, da mais crítica para a menos (também por receita ou por chegada), com o que a equipe precisa para agir |
-| **Qualidade do modelo** | Compara a previsão com o resultado real: acurácia, taxa real de comparecimento por faixa e matriz de confusão |
-| **Sistema distribuído** | Vazão, latência de ponta a ponta, tempo no Spark e distribuição das mensagens pelas partições do Kafka |
-
-### 11.5. Como o painel funciona
-
-- Uma thread de fundo consome o tópico `previsoes` e guarda as previsões em memória. Ela lê **desde o começo do tópico** a cada início, sem confirmar offsets: o Kafka guarda as mensagens em disco, então abrir o painel depois reconstrói todo o histórico (reprocessamento).
-- O botão **Recarregar do início** (barra lateral) descarta a tela e lê o tópico de novo.
-- A latência de ponta a ponta só é medida para reservas que chegam **enquanto o painel está aberto**. Ela compara o instante do envio pelo producer com o da chegada aqui; ambos usam o relógio da sua máquina.
+O painel começa com a mensagem *"Conectado ao Kafka. Aguardando previsões..."*. É normal: ainda não enviamos nenhuma reserva. **Deixe este terminal aberto** (o painel roda enquanto ele estiver aberto).
 
 ---
 
-## 12. Testes de resiliência e desempenho (Etapa 6)
+### Passo 5: Enviar as reservas (Terminal 3)
 
-Esta etapa reúne as evidências de sistemas distribuídos: tolerância a falhas (checkpoint), reprocessamento (o Kafka guarda as mensagens), vazão e latência. Tudo roda na sua máquina, com o Docker e o job `streaming` no ar. Use **tópicos zerados** para os números ficarem limpos: `docker compose down -v`, depois `docker compose up -d` e `docker compose up -d streaming`.
+**Abra mais um terminal** (Terminal 3), entre na pasta do projeto e ative o ambiente virtual (os mesmos dois comandos do passo anterior). Depois:
 
-### 12.1. Garantias de entrega: o que o pipeline promete
+```powershell
+python producer/producer.py --taxa 50
+```
 
-| Etapa do fluxo | Garantia |
+O producer envia as reservas, em ordem cronológica, a **50 por segundo**. O replay completo tem cerca de 17 mil reservas e leva uns **6 minutos**. Para um teste mais curto, use `--limite 500` (cerca de 10 segundos).
+
+Durante o envio, aparecem linhas como `1500 enviadas | 50.1 reservas/s`. Ao final, o resumo deve mostrar `Enviadas` igual a `Entregues` e `Erros: 0`, com mensagens distribuídas pelas **3 partições**:
+
+```
+=== Resumo ===
+Enviadas: 500 | Entregues e confirmadas pelo Kafka: 500 | Erros: 0
+Mensagens por particao: {0: 165, 1: 170, 2: 165}
+```
+
+(Os números por partição variam.) Se quiser interromper antes, aperte `Ctrl+C`.
+
+---
+
+### Passo 6: Ver o projeto funcionando
+
+Enquanto o producer envia, olhe o painel em <http://localhost:8501> (ele se atualiza sozinho a cada 2 segundos). Use o seletor de seções no topo:
+
+| Seção | O que olhar |
 |---|---|
-| Producer → Kafka | Confirmação de cada mensagem e envio idempotente (sem duplicar por reenvio de rede) |
-| Kafka → Spark | O checkpoint guarda até onde o Spark leu: após uma queda, ele continua dali e **nenhuma reserva é perdida** |
-| Spark → Kafka (`previsoes`) | **Pelo menos uma vez**: se o job cair no meio de um lote, esse lote pode ser escrito de novo, gerando previsões repetidas |
-| Painel | Idempotente: se a mesma reserva aparece duas vezes, vale a última previsão e o painel avisa quantas ignorou |
+| **Topo (sempre visível)** | Reservas processadas subindo, contagem por faixa de risco e a **receita estimada em risco alto** |
+| **Visão geral** | Insights automáticos, risco por tipo de depósito/segmento/hotel e efeito da antecedência da reserva |
+| **Alertas** | As reservas de risco alto e médio, da mais crítica para a menos. É o que a equipe do hotel usaria para ligar ou fazer uma oferta |
+| **Qualidade do modelo** | Compara previsão com realidade. A taxa real de comparecimento deve **crescer de risco alto para risco baixo** |
+| **Sistema distribuído** | Vazão, **latência de ponta a ponta** (alguns segundos) e as mensagens distribuídas pelas 3 partições |
 
-### 12.2. Verificar a consistência (a qualquer momento)
+Outros lugares para ver o sistema por dentro:
+- <http://localhost:4040>: o job de streaming (abas *Structured Streaming* e *Executors*: as tarefas divididas entre os 2 workers).
+- <http://localhost:8080>: o cluster Spark, com a aplicação `previsao-reservas` em execução.
+- `docker compose logs -f streaming` (Terminal 1): uma linha `lote N | X reservas | ... reservas/s` a cada micro-lote. Para sair dos logs, `Ctrl+C` (o job continua rodando).
 
-```bash
+---
+
+### Passo 7: Conferir que nada foi perdido (Terminal 3)
+
+Quando o producer terminar, espere uns 10 segundos e rode:
+
+```powershell
 python scripts/verificar_consistencia.py
 ```
 
-Lê os tópicos `reservas` e `previsoes` inteiros e informa quantas reservas **ficaram sem previsão** (perda, que não deve acontecer) e quantas previsões estão **repetidas**. Retorna sucesso se nenhuma reserva foi perdida. Se o job ainda estiver processando, espere alguns segundos e rode de novo.
+O esperado:
 
-### 12.3. Teste de falha: derrubar o Spark no meio
+```
+Reservas SEM previsao (perdidas): 0
+Previsoes REPETIDAS (duplicatas): 0
 
-```bash
+RESULTADO: OK - toda reserva gerou exatamente uma previsao.
+```
+
+Se aparecer `FALHA` logo depois do producer, é só o Spark ainda processando: espere um pouco e rode de novo.
+
+---
+
+### Passo 8: Desligar
+
+1. No **Terminal 2** (painel): `Ctrl+C`.
+2. No **Terminal 1**:
+   ```powershell
+   docker compose down
+   ```
+
+Isso desliga os containers, mas **mantém os dados** (veja a seção 4). Pronto: você completou a primeira execução.
+
+### Checklist: está tudo certo?
+
+- [ ] `docker compose ps -a` mostra `kafka` healthy e os três containers do Spark `Up`
+- [ ] O treino terminou com `Concluido.` e o ROC-AUC ficou acima de 0,90
+- [ ] O log do `streaming` mostra `Streaming ativo`
+- [ ] O painel mostra as reservas chegando e as 5 seções funcionam
+- [ ] `verificar_consistencia.py` informa **0 reservas perdidas**
+
+---
+
+## 4. Uso no dia a dia (depois da primeira vez)
+
+Depois da primeira execução, o modelo já está treinado e as imagens já foram construídas, então **ligar o projeto é rápido** (cerca de 1 minuto). Você **não** precisa repetir o treino nem o `--build`.
+
+### Ligar (Terminal 1)
+
+Abra o **Docker Desktop**, espere ele ficar pronto e rode:
+
+```powershell
+docker compose up -d
+docker compose up -d streaming
+docker compose logs --tail 5 streaming
+```
+
+Repita o último comando até aparecer `Streaming ativo: 'reservas' -> 'previsoes' ...` (leva uns 30 a 60 segundos).
+
+### Abrir o painel (Terminal 2)
+
+```powershell
+cd "C:\caminho\para\trabalho_final_sd"
+.venv\Scripts\Activate.ps1
+streamlit run consumer/painel.py
+```
+
+Abra <http://localhost:8501>.
+
+### Enviar reservas (Terminal 3)
+
+```powershell
+cd "C:\caminho\para\trabalho_final_sd"
+.venv\Scripts\Activate.ps1
+python producer/producer.py --taxa 50
+```
+
+### Desligar
+
+1. `Ctrl+C` no painel (Terminal 2) e, se estiver rodando, no producer (Terminal 3).
+2. No Terminal 1:
+   ```powershell
+   docker compose down
+   ```
+
+### O que acontece com os dados quando eu desligo?
+
+Isso é importante para não se confundir ao ligar de novo:
+
+| Comando | Containers | Reservas e previsões no Kafka | Estado do Spark (checkpoint) | Modelo e dados (pastas `model/` e `data/`) | Imagens Docker |
+|---|---|---|---|---|---|
+| `docker compose down` | removidos | **mantidas** | **mantido** | mantidos | mantidas |
+| `docker compose down -v` | removidos | **apagadas** | **apagado** | mantidos | mantidas |
+| `docker compose down -v --rmi all` | removidos | apagadas | apagado | mantidos | apagadas |
+
+Na prática:
+
+- **Se você usou `docker compose down` (sem `-v`)**, ao ligar de novo as reservas e previsões da vez anterior **continuam lá**. O painel lê tudo desde o começo e mostra o histórico imediatamente, mesmo antes de enviar reservas novas. Isso é o Kafka guardando as mensagens em disco.
+- **Se você rodar o producer outra vez sem zerar**, as mesmas reservas são publicadas de novo (os ids se repetem). O sistema funciona normalmente, e o painel ignora as repetidas pelo `id_reserva`, mas os contadores de `reservas` no Kafka dobram. Para uma demonstração limpa, **zere antes** (próxima seção).
+- Só quer rever o painel com os dados que já existem? Ligue o Docker e o `streaming` e abra o painel, sem rodar o producer.
+
+---
+
+## 5. Zerar e testar do zero
+
+Há dois níveis de "zerar". Escolha o que precisa.
+
+### 5.1. Reset rápido: apagar dados e recomeçar (o mais usado)
+
+Apaga todas as reservas, previsões e o estado do Spark. **Mantém** o modelo treinado, o dataset e as imagens Docker (então é rápido). Use antes de cada teste ou demonstração.
+
+**1.** Se o painel estiver aberto, pare-o: `Ctrl+C` no Terminal 2 (e o producer, se estiver rodando).
+
+**2.** No Terminal 1:
+
+```powershell
+docker compose down -v
+docker compose up -d
+docker compose up -d streaming
+docker compose logs --tail 5 streaming
+```
+
+Repita o último comando até aparecer `Streaming ativo`. (Como o `-v` apaga também o cache do conector do Kafka, o job leva ~1 minuto a mais para subir.)
+
+**3.** Abra o painel de novo (Terminal 2: `streamlit run consumer/painel.py`). Ele começa vazio: *"Aguardando previsões"*.
+
+**4.** Envie as reservas (Terminal 3: `python producer/producer.py --taxa 50`).
+
+> Não deixe o painel aberto durante o reset. Se ele ficar aberto, mantém na tela os dados antigos; nesse caso, feche-o e abra de novo (ou use o botão **Recarregar do início** na barra lateral).
+
+### 5.2. Reset completo: voltar ao estado de "computador novo"
+
+Apaga **tudo** o que foi gerado: containers, volumes, imagens Docker, modelo e arquivos de dados. Use para testar se o passo a passo funciona do zero (por exemplo, antes de entregar o trabalho). Depois você precisa refazer a [primeira execução](#3-primeira-execução-passo-a-passo), incluindo os downloads.
+
+**1.** Pare o painel e o producer (`Ctrl+C`).
+
+**2.** No Terminal 1 (apaga containers, volumes e imagens, inclusive a do Kafka):
+
+```powershell
+docker compose down -v --rmi all
+```
+
+**3.** Apague o modelo e os dados gerados:
+
+```powershell
+Remove-Item model\modelo_rf.joblib, model\metadados.json -ErrorAction SilentlyContinue
+Remove-Item data\reservas_replay.csv, data\hotel_bookings.csv -ErrorAction SilentlyContinue
+Remove-Item data\resultados_carga.csv -ErrorAction SilentlyContinue
+```
+
+(No macOS/Linux: `rm -f model/modelo_rf.joblib model/metadados.json data/*.csv`.)
+
+**4.** *(Opcional, para testar também a instalação do Python)* apague o ambiente virtual:
+
+```powershell
+deactivate
+Remove-Item -Recurse -Force .venv
+```
+
+**5.** Refaça tudo a partir da [seção 2.4](#24-ambiente-virtual-do-python-uma-vez) (se apagou o `.venv`) ou da [seção 3](#3-primeira-execução-passo-a-passo).
+
+### 5.3. Só recalcular as previsões (sem apagar as reservas)
+
+Para mostrar o **reprocessamento** (o Kafka guardou as reservas, então o Spark pode recalcular tudo, por exemplo com um modelo novo), veja a [seção 6.5](#65-reprocessamento-o-kafka-guarda-as-mensagens).
+
+---
+
+## 6. Testes de resiliência e desempenho
+
+Estes testes reúnem as evidências de sistemas distribuídos: tolerância a falhas, reprocessamento, vazão e latência. Rode-os no **Terminal 3** (com `(.venv)` ativo), com o Docker e o job `streaming` no ar. Para os números ficarem limpos, **zere antes** (seção 5.1) e rode um teste de cada vez.
+
+### 6.1. Garantias de entrega: o que o pipeline promete
+
+| Etapa do fluxo | Garantia |
+|---|---|
+| Producer → Kafka | Cada mensagem é confirmada pelo Kafka; envio idempotente (sem duplicar por reenvio de rede) |
+| Kafka → Spark | O *checkpoint* guarda até onde o Spark leu: após uma queda, ele continua dali e **nenhuma reserva é perdida** |
+| Spark → Kafka (`previsoes`) | **Pelo menos uma vez**: se o job cair no meio de um lote, esse lote pode ser escrito de novo, gerando previsões repetidas |
+| Painel | Idempotente: se a mesma reserva aparece duas vezes, vale a última previsão, e o painel avisa quantas ignorou |
+
+### 6.2. Verificar a consistência (a qualquer momento)
+
+```powershell
+python scripts/verificar_consistencia.py
+```
+
+Lê os tópicos `reservas` e `previsoes` inteiros e informa quantas reservas **ficaram sem previsão** (perda, que não deve acontecer) e quantas previsões estão **repetidas**. Se o job ainda estiver processando, espere alguns segundos e rode de novo.
+
+### 6.3. Teste de falha: derrubar o Spark no meio
+
+```powershell
 python scripts/teste_resiliencia.py
 ```
 
-O script envia 3000 reservas (50 por segundo) e, após 20 segundos, **mata o container do Spark** (`SIGKILL`, uma queda abrupta). Mantém o job fora do ar por 15 segundos, enquanto as reservas continuam chegando ao Kafka, e então o religa. O Spark retoma do checkpoint, processa o que ficou acumulado e o script mostra o relatório de consistência.
+O script (leva de 2 a 3 minutos) executa cinco etapas, narrando cada uma na tela:
 
-Resultado esperado: **reservas sem previsão: 0**. Pode haver algumas previsões repetidas (no máximo o lote que estava em andamento na queda, cerca de uma centena); o painel as ignora. Opções: `--reservas`, `--taxa`, `--derrubar-apos`, `--pausa`.
+1. Inicia o producer (3000 reservas, 50 por segundo).
+2. Após 20 segundos, **mata o container do Spark** (`SIGKILL`: uma queda abrupta).
+3. Mantém o Spark fora do ar por 15 segundos; as reservas continuam chegando e **ficam guardadas no Kafka**.
+4. Religa o Spark, que retoma do checkpoint (leva uns 20 a 30 segundos para voltar).
+5. Espera o processamento terminar e mostra o relatório de consistência.
 
-Para mostrar ao vivo, abra o painel durante o teste: a vazão cai a zero quando o Spark morre e dispara quando ele volta.
+O esperado é **`Reservas SEM previsao (perdidas): 0`**. Pode ou não aparecer algumas previsões repetidas (no máximo o lote em andamento na queda); o painel as ignora.
 
-### 12.4. Teste de carga: vazão e latência
+Exemplo de resultado obtido (varia conforme o momento da queda):
 
-```bash
+```
+[2] DERRUBANDO o Spark (SIGKILL). Ate agora: 878 reservas enviadas, 829 previsoes prontas.
+    reservas no Kafka: 1709 | previsoes: 829 (paradas)
+    previsoes prontas: 3000/3000
+Reservas SEM previsao (perdidas): 0
+RESULTADO: OK - toda reserva gerou exatamente uma previsao.
+```
+
+Dica: deixe o painel aberto na seção **Sistema distribuído** durante o teste. A vazão cai a zero quando o Spark morre e dispara quando ele volta.
+
+Opções: `--reservas`, `--taxa`, `--derrubar-apos`, `--pausa`.
+
+### 6.4. Teste de carga: vazão e latência
+
+```powershell
 python scripts/teste_carga.py
 ```
 
-Testa taxas crescentes de chegada (20, 100, 300 e 600 reservas por segundo, durante 20 s cada) e mede a vazão de saída e a latência de ponta a ponta (p50, p95, p99), salvando em `data/resultados_carga.csv`. Opções: `--taxas 50 200 400 800`, `--duracao 30`.
+Leva de 3 a 4 minutos. Testa taxas crescentes de chegada (20, 100, 300 e 600 reservas por segundo, 20 s cada) e mede a vazão de saída e a latência de ponta a ponta (p50, p95, p99), salvando em `data\resultados_carga.csv`.
 
-Como ler o resultado: enquanto a taxa de chegada está abaixo da capacidade do Spark, a latência fica em poucos segundos. Quando passa da capacidade, as reservas se acumulam no Kafka e a latência cresce: é o **ponto de saturação**. Com a configuração padrão, a capacidade teórica é `max-por-lote ÷ intervalo` = 1000 ÷ 2 s = **500 reservas/s**, então a rodada de 600/s deve aparecer como saturada.
+Exemplo de resultado (a mesma máquina, configuração padrão):
 
-**Aumentando a capacidade:** o tamanho do lote e o intervalo são configuráveis. Por exemplo, para até 4000 reservas por lote a cada 1 segundo (PowerShell):
+| Taxa de chegada | Vazão de saída | Latência p50 / p95 | Situação |
+|---|---|---|---|
+| 20/s | 20/s | 2,0 s / 2,9 s | ok |
+| 100/s | 109/s | 2,0 s / 3,0 s | ok |
+| 300/s | 325/s | 1,8 s / 2,7 s | ok |
+| 600/s | 484/s | 3,7 s / 6,0 s | no limite |
+
+**Como ler:** até 300/s o sistema acompanha a chegada, com latência de cerca de 2 segundos (esse piso é o intervalo do micro-lote). Em 600/s a vazão de saída estabiliza perto de 500/s e a latência sobe: é o **ponto de saturação**. A capacidade teórica é `max-por-lote ÷ intervalo` = 1000 ÷ 2 s = **500 reservas/s**. Com taxas maiores e rodadas mais longas (`--taxas 600 800 1000 --duracao 40`), a fila no Kafka cresce e a latência dispara.
+
+**Aumentando a capacidade** (ou reduzindo a latência mínima): o tamanho do lote e o intervalo são configuráveis. No PowerShell, por exemplo:
 
 ```powershell
 $env:MAX_POR_LOTE=4000; $env:INTERVALO=1; docker compose up -d streaming
 python scripts/teste_carga.py --taxas 300 600 1000
 ```
 
-(Para voltar ao padrão: `Remove-Item Env:MAX_POR_LOTE, Env:INTERVALO` e `docker compose up -d streaming`.) O limite agora passa a ser o hardware: os 2 workers têm 2 cores cada, e o modelo roda em Python.
+Para voltar ao padrão:
 
-### 12.5. Reprocessamento: o Kafka guarda as mensagens
+```powershell
+Remove-Item Env:MAX_POR_LOTE, Env:INTERVALO
+docker compose up -d streaming
+```
 
-O Kafka mantém as reservas em disco, então é possível apagar todos os resultados e recalculá-los. Com o `streaming` já tendo processado reservas:
+### 6.5. Reprocessamento: o Kafka guarda as mensagens
+
+O Kafka mantém as reservas em disco, então é possível apagar todos os resultados e recalculá-los. Com o `streaming` já tendo processado reservas, no **Terminal 1**, um comando por vez:
 
 ```powershell
 docker compose stop streaming
@@ -564,120 +601,259 @@ docker compose up kafka-init
 docker compose up -d streaming
 ```
 
-O que isso faz: apaga o checkpoint e o tópico de resultados (`previsoes`), mas **não** o de entrada (`reservas`). Ao iniciar sem checkpoint, o Spark lê o `reservas` desde o começo e gera todas as previsões de novo (por exemplo, com um modelo atualizado). Quando terminar, confira com `python scripts/verificar_consistencia.py`: reservas e previsões devem coincidir. O painel (botão **Recarregar do início**) mostra tudo de novo.
+Isso apaga o checkpoint e o tópico de resultados (`previsoes`), mas **não** o de entrada (`reservas`). Ao iniciar sem checkpoint, o Spark lê o `reservas` desde o começo e gera todas as previsões de novo. Espere o `Streaming ativo` aparecer nos logs e confira no Terminal 3:
 
-### 12.6. Resumo: o que cada teste demonstra
+```powershell
+python scripts/verificar_consistencia.py
+```
+
+Reservas e previsões devem coincidir. Se o painel estava aberto, use o botão **Recarregar do início**.
+
+> O nome do volume (`trabalho_final_sd_checkpoints`) vem do nome da pasta do projeto. Se você renomear a pasta, confira o nome com `docker volume ls`.
+
+### 6.6. O que cada teste demonstra
 
 | Conceito de sistemas distribuídos | Onde aparece |
 |---|---|
-| Desacoplamento produtor/consumidor | Producer e Spark independentes; o Spark pode cair sem o producer parar (12.3) |
-| Persistência e reprocessamento | O Kafka guarda as reservas em disco (12.5) |
-| Tolerância a falhas | Checkpoint do Spark (12.3) |
-| Semântica de entrega | Pelo menos uma vez no sink + consumidor idempotente (12.1) |
+| Desacoplamento produtor/consumidor | Producer e Spark são independentes; o Spark pode cair sem o producer parar (6.3) |
+| Persistência e reprocessamento | O Kafka guarda as reservas em disco (6.5) |
+| Tolerância a falhas | Checkpoint do Spark (6.3) |
+| Semântica de entrega | Pelo menos uma vez no destino + consumidor idempotente (6.1) |
 | Paralelismo | Partições do Kafka → tarefas do Spark em 2 workers (painel e <http://localhost:4040>) |
-| Escalabilidade e saturação | Teste de carga e ajuste do lote (12.4) |
+| Escalabilidade e saturação | Teste de carga e ajuste do lote (6.4) |
 
 ---
 
-## 13. Problemas comuns
+## 7. Como o projeto funciona
 
-**`Cannot connect to the Docker daemon`** — o Docker não está rodando. Abra o Docker Desktop (Windows/macOS) ou execute `sudo systemctl start docker` (Linux).
+### 7.1. As peças
 
-**`permission denied` ao rodar `docker` no Linux** — você ainda não foi adicionado ao grupo `docker`. Execute `sudo usermod -aG docker $USER` e faça logout/login (ou use `sudo`).
+| Peça | O que faz | Onde roda | Arquivo principal |
+|---|---|---|---|
+| **Treino** | Limpa o dataset, treina o Random Forest e gera o arquivo de reservas para simulação | Docker (sob demanda) | `model/treinar_modelo.py` |
+| **Producer** | Lê o arquivo de simulação e publica cada reserva no Kafka, em ordem cronológica | Sua máquina | `producer/producer.py` |
+| **Kafka** | Recebe e guarda as mensagens; divide a carga em 3 partições (tópicos `reservas` e `previsoes`) | Docker | `docker-compose.yml` |
+| **Spark Streaming** | Lê `reservas` em micro-lotes, limpa os dados, aplica o modelo nos workers e escreve em `previsoes` | Docker (1 master, 2 workers e o job) | `spark/streaming_job.py` |
+| **Painel** | Lê `previsoes` e mostra alertas, insights, qualidade do modelo e métricas do sistema | Sua máquina | `consumer/painel.py` |
 
-**`port is already allocated`** — outra aplicação usa a porta. Veja a seção de portas acima.
+### 7.2. O caminho de uma reserva
 
-**`kafka` fica `unhealthy` ou reinicia** — normalmente falta de memória. Aumente a memória do Docker (seção 2) e rode `docker compose down -v && docker compose up -d`.
+1. O **producer** envia uma reserva ao Kafka como uma mensagem JSON (exemplo ilustrativo, abreviado):
+   ```json
+   {"id_reserva": "R000051", "hotel": "City Hotel", "lead_time": 120, "deposit_type": "Non Refund",
+    "adults": 2, "adr": 85.5, "...": "...", "data_reserva": "2014-11-12", "desfecho_real": 0, "ts_envio_ms": 1793653547000}
+   ```
+   O campo `desfecho_real` (a reserva compareceu ou não) viaja junto **apenas** para o painel comparar previsão com realidade. O modelo nunca o enxerga.
+2. O **Kafka** guarda a mensagem em uma das 3 partições do tópico `reservas` (a chave é o `id_reserva`, o que distribui a carga por igual).
+3. O **Spark** lê as mensagens novas a cada 2 segundos (micro-lote). Cada partição do Kafka vira uma tarefa, executada em paralelo nos workers. Em cada uma: descarta mensagens corrompidas e reservas inválidas, calcula as variáveis do modelo e aplica o Random Forest (pandas UDF).
+4. O Spark publica o resultado no tópico `previsoes` (exemplo):
+   ```json
+   {"id_reserva": "R000051", "probabilidade": 0.2314, "faixa_risco": "alto", "desfecho_real": 0,
+    "deposit_type": "Non Refund", "lead_time": 120, "noites": 3, "adr": 85.5, "...": "..."}
+   ```
+   `probabilidade` é a chance de o hóspede **chegar**; por isso uma probabilidade baixa significa risco **alto**.
+5. O **painel** lê o tópico `previsoes` e atualiza a tela.
 
-**Workers não aparecem em `localhost:8080`** — aguarde ~20 segundos e atualize a página; se persistir, `docker compose logs spark-worker-1`.
+### 7.3. Decisões de projeto
 
-**Falha ao baixar imagens** — verifique a conexão com a internet e se o Docker consegue acessar o Docker Hub (`docker pull hello-world`).
+- **Treino offline, inferência em streaming.** Um Random Forest não aprende de forma incremental: ele é treinado uma vez e só a previsão roda em tempo real.
+- **Replay só com dados de teste.** O modelo é treinado com 80% das reservas; o simulador usa os 20% restantes, que o modelo nunca viu. Assim a acurácia mostrada no painel é honesta.
+- **Sem vazamento de dados.** O resultado real (`desfecho_real`) e o status final da reserva ficam fora das variáveis do modelo.
+- **Ordem cronológica.** A data da reserva é reconstruída como `data de chegada − antecedência (lead_time)`, o que dá uma ordem realista de chegada dos eventos.
+- **Mesmo código no treino e no Spark.** A limpeza e as variáveis ficam em `common/preprocessing.py`, usado pelos dois.
+- **Treino dentro do Docker.** O arquivo do modelo só é confiável com as mesmas versões de bibliotecas nos executors do Spark; treinar na mesma imagem garante isso.
+- **Chave de partição = `id_reserva`.** Se fosse o tipo de hotel (só 2 valores), uma das 3 partições ficaria vazia.
+- **Entrega "pelo menos uma vez" + consumidor idempotente.** Após uma falha, o Spark pode reescrever um lote; o painel ignora repetições pelo `id_reserva`.
+- **Modelo carregado uma vez por executor**, e não a cada micro-lote, para a inferência ser rápida.
 
-**`python` não é reconhecido (Windows)** — o Python não foi adicionado ao PATH. Reinstale marcando "Add python.exe to PATH", ou use `py` no lugar de `python`. Abra um terminal novo depois de instalar.
+### 7.4. Glossário
 
-**`pip install` falha ao compilar algum pacote** — normalmente é uma versão do Python muito nova ou muito antiga. Use Python entre 3.10 e 3.13.
+| Termo | Significado |
+|---|---|
+| **Evento** | Algo que aconteceu e é registrado: aqui, a chegada de uma reserva |
+| **Tópico** | "Caixa de correio" do Kafka onde as mensagens são publicadas (`reservas`, `previsoes`) |
+| **Partição** | Pedaço de um tópico; permite dividir a carga e processar em paralelo |
+| **Offset** | Posição de uma mensagem dentro de uma partição |
+| **Producer / Consumer** | Quem publica mensagens / quem as lê |
+| **Micro-lote** | Pequeno grupo de mensagens que o Spark processa de uma vez (a cada 2 s) |
+| **Worker / Executor** | Processo do Spark que executa as tarefas; temos 2 workers |
+| **pandas UDF** | Função Python aplicada em blocos de linhas, em paralelo, nos executors |
+| **Checkpoint** | Anotação do Spark de até onde já leu no Kafka; permite retomar após uma falha |
+| **Idempotente** | Que dá o mesmo resultado se a operação for repetida (ignorar uma mensagem repetida) |
+| **Vazão** | Quantas reservas o sistema processa por segundo |
+| **Latência** | Quanto tempo uma reserva leva do envio até a previsão chegar ao painel |
 
-**`ModuleNotFoundError: No module named 'sklearn'` (ou pandas, joblib...)** — o ambiente virtual não está ativo. Ative-o (seção 7.2) e rode de novo.
-
-**`FileNotFoundError` / dataset não encontrado** — veja a seção 8 sobre o download manual do dataset.
-
-**`Nao foi possivel conectar ao Kafka em localhost:29092`** — o Docker não está rodando ou os containers estão desligados. Rode `docker compose up -d` e confira com `docker compose ps -a`.
-
-**`O topico 'reservas' nao existe`** — o `kafka-init` não rodou. Execute `docker compose up kafka-init` e veja `docker compose logs kafka-init`.
-
-**`ModuleNotFoundError: No module named 'confluent_kafka'`** — falta instalar a dependência nova: `pip install -r requirements.txt` com o ambiente virtual ativo.
-
-**`Arquivo nao encontrado: ...reservas_replay.csv`** — o treino ainda não foi executado (seção 8).
-
-**Falha no `docker compose build` (apt ou pip)** — normalmente é rede. Tente de novo; se persistir, verifique proxy/VPN e se o Docker consegue baixar da internet.
-
-**`Modelo nao encontrado em model/`** (log do `streaming`) — falta rodar `docker compose run --rm treino`.
-
-**`Failed to find data source: kafka`** ou erro de download do pacote — o conector Kafka não foi baixado (sem internet no primeiro uso). Confira a conexão e rode `docker compose up -d streaming` de novo.
-
-**`Initial job has not accepted any resources`** — os workers não estão disponíveis ou faltam recursos. Confira em <http://localhost:8080> se há 2 workers `ALIVE` e se o Docker tem pelo menos 6 GB de memória.
-
-**Erro de offsets / `Partition reservas-0's offset was changed`** — o tópico foi recriado mas o checkpoint antigo ficou. Zere tudo: `docker compose down -v` e `docker compose up -d`.
-
-**O `streaming` encerra logo após subir** — veja o motivo com `docker compose logs streaming`.
-
-**`streamlit` não é reconhecido** — o ambiente virtual não está ativo ou falta `pip install -r requirements.txt`. Alternativa: `python -m streamlit run consumer/painel.py`.
-
-**Painel mostra "Sem conexão com o Kafka"** — o Docker não está rodando ou o Kafka está desligado. Rode `docker compose up -d` e confira `docker compose ps -a`. O painel tenta reconectar sozinho.
-
-**Painel fica em "Aguardando previsões"** — conectou, mas o tópico `previsoes` está vazio. Confira se o `streaming` está rodando (`docker compose logs --tail 20 streaming`) e se o producer foi iniciado.
-
-**A latência de ponta a ponta aparece como "—"** — nenhuma reserva chegou ao vivo ainda. Inicie o producer com o painel aberto.
-
-**Porta 8501 em uso** — rode em outra porta: `streamlit run consumer/painel.py --server.port 8502`.
-
-**`verificar_consistencia` mostra reservas sem previsão** — o job pode ainda estar processando (espere e rode de novo). Se persistir, o tópico `previsoes` foi recriado sem apagar o checkpoint: siga a seção 12.5 ou use `docker compose down -v`.
-
-**`teste_resiliencia` falha em `docker compose kill`** — rode o script a partir de um terminal onde o comando `docker` funcione e confira que o serviço `streaming` está de pé (`docker compose ps -a`).
-
-**`teste_carga` mostra "sem resposta" em todas as rodadas** — o job `streaming` não está processando. Veja `docker compose logs --tail 30 streaming`.
-
-**Latências muito altas já na primeira rodada do teste de carga** — normal se o job acabou de subir; rode de novo depois de alguns minutos.
-
----
-
-## Estrutura do projeto
+### 7.5. Estrutura de pastas
 
 ```
 trabalho_final_sd/
-├── docker-compose.yml   # Kafka, Spark, treino e streaming
-├── requirements.txt     # dependências Python da sua máquina (producer/consumer)
+├── docker-compose.yml       # Kafka, Spark, treino e streaming
+├── requirements.txt         # dependências Python da sua máquina (producer e painel)
 ├── common/
-│   ├── preprocessing.py # limpeza e features, compartilhadas entre treino e Spark
-│   └── inferencia.py    # previsão do modelo, executada nos executors
-├── data/                # dataset e reservas_replay.csv (gerados na Etapa 2)
+│   ├── preprocessing.py     # limpeza e variáveis, compartilhadas entre treino e Spark
+│   └── inferencia.py        # previsão do modelo, executada nos executors
+├── data/                    # dataset e reservas_replay.csv (gerados pelo treino)
 ├── model/
-│   └── treinar_modelo.py  # preparo dos dados + treino (Etapa 2)
+│   └── treinar_modelo.py    # preparo dos dados + treino do modelo
 ├── producer/
-│   └── producer.py      # publica as reservas no Kafka (Etapa 3)
+│   └── producer.py          # publica as reservas no Kafka
 ├── spark/
-│   ├── Dockerfile             # imagem do Spark (Python, Java, bibliotecas fixas)
-│   ├── requirements-spark.txt # versões fixas usadas nos containers
-│   └── streaming_job.py       # job de streaming (Etapa 4)
+│   ├── Dockerfile               # imagem do Spark (Python, Java, bibliotecas fixas)
+│   ├── requirements-spark.txt   # versões fixas usadas nos containers
+│   └── streaming_job.py         # job de streaming
 ├── consumer/
-│   ├── coletor.py       # lê o tópico previsoes numa thread de fundo
-│   ├── analise.py       # cálculos do painel (funções puras)
-│   └── painel.py        # painel Streamlit (Etapa 5)
+│   ├── coletor.py           # lê o tópico previsoes numa thread de fundo
+│   ├── analise.py           # cálculos do painel
+│   └── painel.py            # painel Streamlit
 ├── scripts/
 │   ├── verificar_consistencia.py  # confere reservas x previsões (perdas e duplicatas)
 │   ├── teste_resiliencia.py       # derruba o Spark no meio do processamento
 │   └── teste_carga.py             # vazão e latência por taxa de chegada
+├── .streamlit/config.toml   # configuração do Streamlit
 ├── ROTEIRO_DEMONSTRACAO.md  # roteiro da apresentação
-├── .streamlit/config.toml  # configuração do Streamlit
 └── README.md
 ```
 
-## Próximas etapas
+Os arquivos em `data/` e `model/` (dataset, modelo e replay) **não vão para o GitHub**: são gerados pelo treino (passo 2 da seção 3).
 
-- [x] Etapa 1 — Infraestrutura (Kafka + Spark)
-- [x] Etapa 2 — Preparo dos dados e treino do Random Forest
-- [x] Etapa 3 — Producer
-- [x] Etapa 4 — Spark Structured Streaming
-- [x] Etapa 5 — Consumidor, painel e alertas
-- [x] Etapa 6 — Testes e demonstração de resiliência
-- [ ] Etapa 7 — Documentação final
+---
+
+## 8. Referência rápida
+
+### Endereços e portas
+
+| Endereço | O que é |
+|---|---|
+| <http://localhost:8501> | Painel Streamlit |
+| <http://localhost:8080> | Spark Master (cluster, workers e aplicações) |
+| <http://localhost:4040> | Job de streaming (só existe com o `streaming` rodando) |
+| <http://localhost:8081> / <http://localhost:8082> | Workers 1 e 2 |
+| `localhost:29092` | Kafka, acessado a partir da sua máquina (producer e painel) |
+| `kafka:9092` | Kafka, acessado de dentro do Docker (Spark) |
+
+Se alguma porta já estiver em uso no seu computador, feche o programa que a ocupa ou altere o lado esquerdo do mapeamento no `docker-compose.yml` (por exemplo, `"8090:8080"`).
+
+### Serviços do Docker
+
+| Serviço | Função | Sobe com `docker compose up -d`? |
+|---|---|---|
+| `kafka` | Broker Kafka | Sim |
+| `kafka-init` | Cria os tópicos e termina (`Exited (0)` é normal) | Sim |
+| `spark-master`, `spark-worker-1`, `spark-worker-2` | Cluster Spark | Sim |
+| `streaming` | Job de streaming | **Não**: use `docker compose up -d streaming` |
+| `treino` | Treino do modelo | **Não**: use `docker compose run --rm treino` |
+
+### Comandos úteis (Terminal 1)
+
+| Para... | Comando |
+|---|---|
+| Ver o estado dos containers | `docker compose ps -a` |
+| Ver logs do job | `docker compose logs -f streaming` (saia com `Ctrl+C`) |
+| Parar / religar só o job | `docker compose stop streaming` / `docker compose start streaming` |
+| Listar os tópicos | `docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list` |
+| Ver as partições de um tópico | `docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic reservas` |
+| Contar mensagens por partição | `docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic reservas` |
+| Ler 3 previsões | `docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic previsoes --from-beginning --max-messages 3` |
+
+### Opções do producer
+
+| Opção | Efeito | Padrão |
+|---|---|---|
+| `--taxa N` | N reservas por segundo (`0` = velocidade máxima) | 5 |
+| `--limite N` | Envia só as N primeiras reservas | todas (~17 mil) |
+| `--csv CAMINHO` | Usa outro arquivo de simulação | `data/reservas_replay.csv` |
+| `--topico NOME` | Tópico de destino | `reservas` |
+| `--bootstrap HOST:PORTA` | Endereço do Kafka | `localhost:29092` |
+
+---
+
+## 9. Problemas comuns
+
+### 9.1. Instalação: Docker e WSL
+
+**`wsl --install` dá `Wsl/Service/E_UNEXPECTED` ou fica pedindo "Enter new UNIX username" em loop (Windows)** — o Docker Desktop **não precisa** do Ubuntu. Saia do loop com `Ctrl+C`, reinicie o computador e, no PowerShell como administrador:
+```powershell
+wsl --update
+wsl --shutdown
+wsl --unregister Ubuntu
+wsl --install --no-distribution
+```
+Reinicie de novo se pedir e instale o Docker Desktop. Se ainda falhar, confira se a **virtualização** está habilitada (Gerenciador de Tarefas → Desempenho → CPU → "Virtualização: Habilitada"; senão, ative na BIOS: *Intel VT-x*, *SVM Mode* ou *AMD-V*) e se os recursos **Plataforma de Máquina Virtual** e **Subsistema do Windows para Linux** estão marcados em "Ativar ou desativar recursos do Windows".
+
+**`Cannot connect to the Docker daemon`** — o Docker não está rodando. Abra o Docker Desktop (Windows/macOS) ou `sudo systemctl start docker` (Linux).
+
+**`permission denied` ao rodar `docker` no Linux** — `sudo usermod -aG docker $USER` e faça logout/login (ou use `sudo`).
+
+**`port is already allocated`** — outra aplicação usa a porta. Veja a tabela de portas (seção 8).
+
+**`kafka` fica `unhealthy` ou reinicia** — normalmente falta de memória. Dê pelo menos 6 GB ao Docker (seção 2.1) e rode `docker compose down -v` e `docker compose up -d`.
+
+**Falha ao baixar imagens ou no `docker compose up --build` (apt ou pip)** — normalmente é rede. Tente de novo; se persistir, verifique proxy/VPN e se o Docker acessa a internet (`docker run --rm hello-world`).
+
+### 9.2. Python
+
+**`python` não é reconhecido (Windows)** — o Python não foi adicionado ao PATH. Reinstale marcando "Add python.exe to PATH", ou use `py` no lugar de `python`. Abra um terminal novo depois de instalar.
+
+**O PowerShell bloqueia a ativação do `.venv` ("execução de scripts desabilitada")** — rode uma vez `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, responda `S` e repita.
+
+**`pip install` falha ao compilar algum pacote** — normalmente é uma versão do Python muito nova ou muito antiga. Use Python entre 3.10 e 3.13.
+
+**`ModuleNotFoundError: No module named 'confluent_kafka'` (ou `pandas`, `streamlit`...)** — o ambiente virtual não está ativo neste terminal. Ative-o (`.venv\Scripts\Activate.ps1`) e, se faltar o pacote, rode `pip install -r requirements.txt`.
+
+**`streamlit` não é reconhecido** — mesmo motivo (ambiente virtual inativo). Alternativa: `python -m streamlit run consumer/painel.py`.
+
+### 9.3. Treino e dados
+
+**O download do dataset falha** — baixe o arquivo em <https://www.kaggle.com/datasets/jessemostipak/hotel-booking-demand>, copie o `hotel_bookings.csv` para a pasta `data\` e rode `docker compose run --rm treino` de novo.
+
+**`Arquivo nao encontrado: ...reservas_replay.csv` (producer)** — o treino ainda não foi executado (passo 2 da seção 3).
+
+**`Modelo nao encontrado em model/` (log do `streaming`)** — falta rodar `docker compose run --rm treino`. Depois, `docker compose up -d streaming`.
+
+### 9.4. Kafka e producer
+
+**`Nao foi possivel conectar ao Kafka em localhost:29092`** — o Docker não está rodando ou os containers estão desligados. Rode `docker compose up -d` e confira `docker compose ps -a`.
+
+**`O topico 'reservas' nao existe`** — o `kafka-init` não rodou. Execute `docker compose up kafka-init` e veja `docker compose logs kafka-init`.
+
+**`Failed to acquire idempotence PID ... retrying` (aviso no producer)** — normal logo depois de subir o Kafka; ele resolve sozinho.
+
+### 9.5. Spark e streaming
+
+**Os workers não aparecem em <http://localhost:8080>** — aguarde ~20 segundos e atualize; se persistir, `docker compose logs spark-worker-1`.
+
+**`Failed to find data source: kafka` ou erro ao baixar pacotes** — o conector do Kafka não foi baixado (sem internet no primeiro uso). Confira a conexão e rode `docker compose up -d streaming` de novo.
+
+**`Initial job has not accepted any resources`** — os workers não estão disponíveis ou faltam recursos. Confira em <http://localhost:8080> se há 2 workers `ALIVE` e se o Docker tem pelo menos 6 GB de memória.
+
+**Erro de offsets (`Partition reservas-0's offset was changed`...)** — o tópico foi recriado, mas o checkpoint antigo ficou. Zere tudo (seção 5.1): `docker compose down -v` e suba de novo.
+
+**O `streaming` encerra logo após subir** — veja o motivo com `docker compose logs streaming`.
+
+### 9.6. Painel
+
+**"Sem conexão com o Kafka"** — o Docker não está rodando ou o Kafka está desligado. Rode `docker compose up -d` e confira `docker compose ps -a`. O painel tenta reconectar sozinho.
+
+**Fica em "Aguardando previsões"** — conectou, mas o tópico `previsoes` está vazio. Confira se o `streaming` está rodando (`docker compose logs --tail 20 streaming`) e se o producer foi iniciado.
+
+**A latência de ponta a ponta aparece como "—"** — nenhuma reserva chegou ao vivo ainda. Inicie o producer com o painel aberto. Ao abrir o painel depois, ele reconstrói o histórico, mas a latência só vale para reservas que chegam ao vivo.
+
+**O painel mostra dados antigos depois de zerar** — pare o painel (`Ctrl+C`) e abra de novo, ou use o botão **Recarregar do início**.
+
+**Porta 8501 em uso** — `streamlit run consumer/painel.py --server.port 8502`.
+
+### 9.7. Testes
+
+**`verificar_consistencia` mostra reservas sem previsão** — o job pode estar ainda processando: espere alguns segundos e rode de novo. Se persistir, o tópico `previsoes` foi recriado sem apagar o checkpoint: siga a seção 6.5 ou use `docker compose down -v` (seção 5.1).
+
+**`teste_resiliencia` falha em `docker compose kill`** — rode o script na pasta do projeto, num terminal onde o `docker` funcione, e confira que o `streaming` está de pé (`docker compose ps -a`).
+
+**`teste_carga` mostra "sem resposta" em todas as rodadas** — o job `streaming` não está processando. Veja `docker compose logs --tail 30 streaming`.
+
+**Latências muito altas na primeira rodada do teste de carga** — normal se o job acabou de subir; rode de novo depois de alguns minutos.
+
+---
+
+## Para a apresentação
+
+O roteiro completo (tempo de cada parte, o que mostrar, o que falar, perguntas prováveis do professor e limitações a admitir) está em [`ROTEIRO_DEMONSTRACAO.md`](ROTEIRO_DEMONSTRACAO.md).
